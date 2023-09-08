@@ -70,7 +70,7 @@ where
         toml::from_str(&toml_str).expect("Failed to serialize given value to toml");
     let line_ending = rsa::pkcs1::LineEnding::LF;
     let mut rng = rand::thread_rng();
-    let bits = 512;
+    let bits = 2048;
     let priv_key = RsaPrivateKey::new(&mut rng, bits).expect("failed to generate a key");
     let pub_key = RsaPublicKey::from(&priv_key);
 

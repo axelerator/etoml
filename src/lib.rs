@@ -63,7 +63,7 @@ where
     pub values: V,
 }
 
-pub fn encrypt_new<V>(value: V) -> Result<WithPrivateKeyString<V>, EtomlError>
+pub fn encrypt_new<V>(value: V, bits: usize) -> Result<WithPrivateKeyString<V>, EtomlError>
 where
     V: Serialize + for<'a> Deserialize<'a>,
 {
@@ -72,7 +72,6 @@ where
         toml::from_str(&toml_str).expect("Failed to serialize given value to toml");
     let line_ending = rsa::pkcs1::LineEnding::LF;
     let mut rng = rand::thread_rng();
-    let bits = 2048;
     let priv_key = RsaPrivateKey::new(&mut rng, bits).expect("failed to generate a key");
     let pub_key = RsaPublicKey::from(&priv_key);
 
@@ -172,15 +171,18 @@ pub fn decrypt_to_string(
 ///
 /// # Example
 ///
-/// ```
+/// ```ignore
+/// use serde::{Deserialize, Serialize};
+///
 /// #[derive(Serialize, Deserialize)]
 /// struct AppSecrets {
 ///     github: String
 /// }
 ///
-/// fn main() {
-///     let secrets : AppSecrets = etoml::decrypt_default().unwrap();
+/// fn main() -> Result<(), etoml::EtomlError>  {
+///     let secrets = etoml::decrypt_default::<AppSecrets>()?;
 ///     println!("Github key: {}", secrets.github);
+///     Ok(())
 /// }
 /// ```
 pub fn decrypt_default<V>() -> Result<V, EtomlError>
@@ -193,7 +195,7 @@ where
         toml::from_str(&toml_str).map_err(|e| EtomlError::MalformattedToml(e.to_string()))?;
 
     let (_, pub_key_serialized) =
-        read_public_key(&parsed_toml).map_err(|e| EtomlError::MalformattedEtoml(e))?;
+        read_public_key(&parsed_toml).map_err(EtomlError::MalformattedEtoml)?;
 
     let default_priv_key_dir = Path::new("/opt/etoml/keys");
     let priv_key_file = default_priv_key_dir.join(pub_key_serialized);
@@ -342,7 +344,9 @@ Xg5m5+uzGyo4
             [values]
             openai = "ET:yX8FO+3gMWRsfzUNepNv7XYxL5drIiHVOTNeyqrEh9apFCThqkk3RlskaidokB58BCb2Hh6Vi+NaGLI+8PkB/g=="
             "#;
-        let decrypted = decrypt::<MyKeys>(toml_str, PRIVATE_PEM).unwrap();
+        let mut parsed_toml: Value =
+            toml::from_str(&toml_str).expect("Failed to serialize given value to toml");
+        let decrypted = decrypt::<MyKeys>(&mut parsed_toml, PRIVATE_PEM).unwrap();
         assert_eq!("my first secret", decrypted.openai);
     }
 
@@ -369,7 +373,9 @@ Xg5m5+uzGyo4
         // making sure value has been encrypted
         assert_eq!(91, github_encrypted.len());
 
-        let decrypted = decrypt::<MyKeysWithNew>(&encrypted, PRIVATE_PEM).unwrap();
+        let mut parsed_toml: Value =
+            toml::from_str(&encrypted).expect("Failed to serialize given value to toml");
+        let decrypted = decrypt::<MyKeysWithNew>(&mut parsed_toml, PRIVATE_PEM).unwrap();
 
         assert_eq!("AnotherSecret", decrypted.github);
     }
@@ -382,14 +388,16 @@ Xg5m5+uzGyo4
         let WithPrivateKeyString {
             encrypted,
             private_key,
-        } = encrypt_new(unencrypted_value).unwrap();
+        } = encrypt_new(unencrypted_value, 512).unwrap();
 
         // making sure value has been encrypted
         assert_eq!(91, encrypted.values.openai.len());
 
         let output_toml = toml::to_string(&encrypted).unwrap();
 
-        let decrypted = decrypt::<MyKeys>(&output_toml, &private_key).unwrap();
+        let mut parsed_toml: Value =
+            toml::from_str(&output_toml).expect("Failed to serialize given value to toml");
+        let decrypted = decrypt::<MyKeys>(&mut parsed_toml, &private_key).unwrap();
 
         assert_eq!("Secret", decrypted.openai);
     }

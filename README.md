@@ -16,7 +16,7 @@ into a `struct` in your application.
 
 To create/manage secret files you use the command line interface:
 
-```
+```ignore
 Usage: etoml-write <COMMAND>
 
 Commands:
@@ -31,16 +31,18 @@ Options:
 
 In you app you can define a struct with the matching fields to decode your secrets into:
 
-```rust
+```ignore
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 struct AppSecrets {
     github: String
 }
 
-fn main() {
-    let secrets : AppSecrets = etoml::decrypt_default().unwrap();
+fn main() -> Result<(), etoml::EtomlError>  {
+    let secrets = etoml::decrypt_default::<AppSecrets>()?;
     println!("Github key: {}", secrets.github);
+    Ok(())
 }
 ```
 

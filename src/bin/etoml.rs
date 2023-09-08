@@ -106,7 +106,7 @@ fn init(write: bool) -> Result<(), CmdError> {
     let template = Template {
         my_first_key: "my first secret".to_string(),
     };
-    let encrypt_result = etoml::encrypt_new(template).expect("Failed to encrypt template");
+    let encrypt_result = etoml::encrypt_new(template, 2048).expect("Failed to encrypt template");
     let output_toml = toml::to_string(&encrypt_result.encrypted).unwrap();
 
     if write {

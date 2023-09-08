@@ -1,0 +1,309 @@
+use base64::{engine::general_purpose, Engine as _};
+
+use rsa::pkcs8::DecodePrivateKey;
+use rsa::pkcs8::EncodePrivateKey;
+use rsa::traits::PublicKeyParts;
+use rsa::{BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use serde::{Deserialize, Serialize};
+use std::str::FromStr;
+use toml::{Table, Value};
+
+#[derive(Debug, Clone)]
+pub enum EtomlError {
+    IsAlreadyEncrypted,
+    Malformatted,
+}
+
+pub struct WithPrivateKeyString<V>
+where
+    V: Serialize + for<'a> Deserialize<'a>,
+{
+    pub encrypted: Encrypted<V>,
+    pub private_key: String,
+}
+
+#[derive(Serialize)]
+pub struct Encrypted<V>
+where
+    V: Serialize + for<'a> Deserialize<'a>,
+{
+    pub public_key: String,
+    pub values: V,
+}
+
+pub fn encrypt_new<V>(value: V) -> Result<WithPrivateKeyString<V>, EtomlError>
+where
+    V: Serialize + for<'a> Deserialize<'a>,
+{
+    let toml_str = toml::to_string(&value).expect("Failed to serialize given value to toml");
+    let mut parsed_toml: Value =
+        toml::from_str(&toml_str).expect("Failed to serialize given value to toml");
+    let line_ending = rsa::pkcs1::LineEnding::LF;
+    let mut rng = rand::thread_rng();
+    let bits = 512;
+    let priv_key = RsaPrivateKey::new(&mut rng, bits).expect("failed to generate a key");
+    let pub_key = RsaPublicKey::from(&priv_key);
+
+    let enc = |s: &str| -> String {
+        if s.starts_with("ET:") {
+            s.to_string()
+        } else {
+            let mut rng_ = rand::thread_rng();
+            let enc_data = pub_key
+                .encrypt(&mut rng_, Pkcs1v15Encrypt, s.as_bytes())
+                .expect("failed to encrypt");
+            let b64 = general_purpose::STANDARD.encode(enc_data);
+            format!("ET:{b64}")
+        }
+    };
+
+    let encrypted_toml_str = transform_toml(&mut parsed_toml, enc);
+    let encrypted_value: V =
+        toml::from_str(&encrypted_toml_str).expect("failed to deserialize encrypted toml");
+    let private_key_pem = priv_key
+        .to_pkcs8_pem(line_ending)
+        .expect("failed to write private key")
+        .to_string();
+
+    let public_key_str = serialize_pubkey(&pub_key);
+    let encrypted = Encrypted {
+        public_key: public_key_str,
+        values: encrypted_value,
+    };
+
+    Ok(WithPrivateKeyString {
+        encrypted,
+        private_key: private_key_pem,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub enum MalformattedError {
+    InvalidToml,
+    MissingPublicKey,
+    InvalidPublicKey,
+}
+
+pub fn is_etoml(toml_str: &str) -> Result<(), MalformattedError> {
+    let parsed_toml: Value =
+        toml::from_str(toml_str).map_err(|_| MalformattedError::InvalidToml)?;
+    if let Value::Table(ref table) = parsed_toml {
+        let key_str = table["public_key"]
+            .as_str()
+            .ok_or(MalformattedError::InvalidPublicKey)?;
+        let _pub_key = deserialize_pubkey(key_str);
+    } else {
+        return Err(MalformattedError::InvalidToml);
+    };
+    Ok(())
+}
+pub fn decrypt_to_string(
+    parsed_toml: &mut Value,
+    priv_key_str: &str,
+) -> Result<String, EtomlError> {
+    let priv_key = RsaPrivateKey::from_pkcs8_pem(priv_key_str).unwrap();
+    let dec = |s: &str| -> String {
+        if s.starts_with("ET:") {
+            let from_b64 = general_purpose::STANDARD.decode(&s[3..]).unwrap();
+
+            let dec_data = priv_key
+                .decrypt(Pkcs1v15Encrypt, from_b64.as_slice())
+                .expect("failed to decrypt");
+            String::from_utf8_lossy(&dec_data).to_string()
+        } else {
+            s.to_string()
+        }
+    };
+    let decrypted_toml_str = transform_toml(parsed_toml, dec);
+    Ok(decrypted_toml_str)
+}
+
+pub fn decrypt<V>(toml_str: &str, private_pem: &str) -> Result<V, EtomlError>
+where
+    V: Serialize + for<'a> Deserialize<'a> + serde::de::DeserializeOwned,
+{
+    let priv_key = RsaPrivateKey::from_pkcs8_pem(private_pem).unwrap();
+
+    let mut parsed_toml: Value = toml::from_str(toml_str).unwrap();
+
+    let dec = |s: &str| -> String {
+        if s.starts_with("ET:") {
+            let from_b64 = general_purpose::STANDARD.decode(&s[3..]).unwrap();
+
+            let dec_data = priv_key
+                .decrypt(Pkcs1v15Encrypt, from_b64.as_slice())
+                .expect("failed to decrypt");
+            String::from_utf8_lossy(&dec_data).to_string()
+        } else {
+            s.to_string()
+        }
+    };
+    let decrypted_toml_str = transform_toml(&mut parsed_toml, dec);
+    let decrypted_table: Table = toml::from_str(&decrypted_toml_str).unwrap();
+    let x = &decrypted_table["values"];
+    let x_ = toml::to_string(&x).unwrap();
+    let v: V = toml::from_str(&x_).unwrap();
+    Ok(v)
+}
+
+pub fn read_public_key(toml: &Value) -> Result<(RsaPublicKey, String), MalformattedError> {
+    if let Value::Table(ref table) = toml {
+        let key_str = table["public_key"]
+            .as_str()
+            .ok_or(MalformattedError::MissingPublicKey)?;
+        let pub_key = deserialize_pubkey(key_str)?;
+        Ok((pub_key, key_str.to_owned()))
+    } else {
+        Err(MalformattedError::InvalidToml)
+    }
+}
+
+pub fn encrypt_existing(toml_str: &str) -> Result<String, MalformattedError> {
+    let mut parsed_toml: Value = toml::from_str(toml_str).unwrap();
+    let (pub_key, _) = read_public_key(&parsed_toml)?;
+
+    let enc = |s: &str| -> String {
+        if s.starts_with("ET:") {
+            s.to_string()
+        } else {
+            let mut rng_ = rand::thread_rng();
+            let enc_data = pub_key
+                .encrypt(&mut rng_, Pkcs1v15Encrypt, s.as_bytes())
+                .expect("failed to encrypt");
+            let b64 = general_purpose::STANDARD.encode(enc_data);
+            format!("ET:{b64}")
+        }
+    };
+
+    Ok(transform_toml(&mut parsed_toml, enc))
+}
+
+fn transform_toml<F>(parsed_toml: &mut Value, transform_fn: F) -> String
+where
+    F: Fn(&str) -> String,
+{
+    transform_values(parsed_toml, &transform_fn);
+
+    
+    toml::to_string(&parsed_toml).unwrap()
+}
+
+fn transform_values<F>(value: &mut Value, transform_fn: &F)
+where
+    F: Fn(&str) -> String,
+{
+    match value {
+        Value::Table(table) => {
+            for (key, sub_value) in table.iter_mut() {
+                if key != "public_key" {
+                    transform_values(sub_value, transform_fn);
+                }
+            }
+        }
+        Value::String(s) => {
+            let transformed = transform_fn(s);
+            *s = transformed;
+        }
+        _ => {}
+    }
+}
+
+fn serialize_pubkey(pub_key: &RsaPublicKey) -> String {
+    format!("{}_{}", pub_key.n(), pub_key.e())
+}
+
+fn parse_bigint_pair(s: &str) -> Option<(BigUint, BigUint)> {
+    let parts: Vec<&str> = s.split('_').collect();
+
+    if parts.len() == 2 {
+        if let (Ok(n), Ok(e)) = (BigUint::from_str(parts[0]), BigUint::from_str(parts[1])) {
+            return Some((n, e));
+        }
+    }
+
+    None
+}
+fn deserialize_pubkey(input: &str) -> Result<RsaPublicKey, MalformattedError> {
+    let (n, e) = parse_bigint_pair(input).ok_or(MalformattedError::InvalidPublicKey)?;
+    RsaPublicKey::new(n, e).map_err(|_| MalformattedError::InvalidPublicKey)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    struct MyKeys {
+        openai: String,
+    }
+
+    const PRIVATE_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA6hhqfgA+g27DgZYs
+NdthykWQ2AyitLXGdEzusgomfDv7apOOmS7vbwoBH0Zuoty+wozRrp/H87AnDCrC
+GkiXfwIDAQABAkB/B47KHwHNOo7WxBHri8eOBp/pzTmBjF5Lf+/LJxzpLm23i/K+
+Rs+Zu/elDjnSgFQnqgO4sX+gkC4zQQuPefTBAiEA8tHTvjP9mBWEs99O5qWkmO1b
+6rnm1R6Jipowbs7GVl8CIQD2zVu3h7LFX+4z4dj5d9g1cGzgkq9B0GTdib7YdpwS
+4QIhAJxV8kFs0eKgQB9bMD6Z+V6ou9xlsrQWhDGj0nkVUmd7AiAlzilJgNDiqSI8
+8lChTjlhXjpfYDjWdQyuXuZMFEcuIQIhAOPQgGl7aBAnv/XbP07cQZaAF/WN2KPo
+Xg5m5+uzGyo4
+-----END PRIVATE KEY-----"#;
+
+    #[test]
+    fn test_decrypt() {
+        let toml_str = r#" public_key = "12260569626986955858848812559948534323761734740811373688584155384436822647212591191730567240822045931966214046021411287999488214521023340344863858673358719_65537"
+
+            [values]
+            openai = "ET:yX8FO+3gMWRsfzUNepNv7XYxL5drIiHVOTNeyqrEh9apFCThqkk3RlskaidokB58BCb2Hh6Vi+NaGLI+8PkB/g=="
+            "#;
+        let decrypted = decrypt::<MyKeys>(toml_str, PRIVATE_PEM).unwrap();
+        assert_eq!("my first secret", decrypted.openai);
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct MyKeysWithNew {
+        openai: String,
+        github: String,
+    }
+
+    #[test]
+    fn test_reencrypt() {
+        let toml_str = r#" public_key = "12260569626986955858848812559948534323761734740811373688584155384436822647212591191730567240822045931966214046021411287999488214521023340344863858673358719_65537"
+
+            [values]
+            openai = "ET:yX8FO+3gMWRsfzUNepNv7XYxL5drIiHVOTNeyqrEh9apFCThqkk3RlskaidokB58BCb2Hh6Vi+NaGLI+8PkB/g=="
+
+            github = "AnotherSecret"
+            "#;
+        let encrypted = encrypt_existing(toml_str).unwrap();
+        let encrypted_parsed: Table = toml::from_str(&encrypted).unwrap();
+        let values = encrypted_parsed["values"].as_table().unwrap();
+        let github_encrypted = values["github"].as_str().unwrap();
+
+        // making sure value has been encrypted
+        assert_eq!(91, github_encrypted.len());
+
+        let decrypted = decrypt::<MyKeysWithNew>(&encrypted, PRIVATE_PEM).unwrap();
+
+        assert_eq!("AnotherSecret", decrypted.github);
+    }
+
+    #[test]
+    fn test_encrypt_new() {
+        let unencrypted_value = MyKeys {
+            openai: "Secret".to_string(),
+        };
+        let WithPrivateKeyString {
+            encrypted,
+            private_key,
+        } = encrypt_new(unencrypted_value).unwrap();
+
+        // making sure value has been encrypted
+        assert_eq!(91, encrypted.values.openai.len());
+
+        let output_toml = toml::to_string(&encrypted).unwrap();
+
+        let decrypted = decrypt::<MyKeys>(&output_toml, &private_key).unwrap();
+
+        assert_eq!("Secret", decrypted.openai);
+    }
+}

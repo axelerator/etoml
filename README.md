@@ -5,7 +5,7 @@
 A tool to create and manage application secrets securely protected in (RSA 2048bits) encrypted toml files.
 
 This is basically a Rust/Toml port of [ejson](https://github.com/Shopify/ejson).
-The main features is it gives you a convenience functions to decrypt your secrets directly
+The main features is it gives you a convenience function to decrypt your secrets directly
 into a `struct` in your application.
 
 ## Install

@@ -18,11 +18,9 @@ name = "etoml"
 
 [dependencies]
 base64 = "0.21.3"
-rand = "0.8.5"
 serde = { version = "1.0.188", features = ["derive"] }
 toml = "0.7.6"
 clap = { version = "4.4.2", features = ["derive"] }
 crypto_box = { version = "0.9.1", features = ["chacha20", "serde"] }
-serde_json = "1.0.105"
 generic-array = { version = "0.14.7", features = ["serde"] }
 

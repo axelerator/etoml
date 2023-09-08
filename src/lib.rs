@@ -189,7 +189,40 @@ pub fn decrypt_default<V>() -> Result<V, EtomlError>
 where
     V: Serialize + for<'a> Deserialize<'a> + serde::de::DeserializeOwned,
 {
-    let toml_str = fs::read_to_string("secrets.etoml").map_err(|_| EtomlError::ETomlNotFound)?;
+    decrypt_file("secrets.etoml")
+}
+
+/// Returns the decrypted secrets deserialized into the given type.
+///
+/// It expects to find the "secrets.etoml" in the same directory as
+/// from where the process is running.
+/// And it looks for the private key in the default location
+/// /opt/etoml/keys
+/// # Arguments
+///
+/// * `etoml` - Path to the .etoml file containing the encrypted data
+/// # Example
+///
+/// ```ignore
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Serialize, Deserialize)]
+/// struct AppSecrets {
+///     github: String
+/// }
+///
+/// fn main() -> Result<(), etoml::EtomlError>  {
+///     let secrets = etoml::decrypt_file::<AppSecrets>("/path/to/some.etoml")?;
+///     println!("Github key: {}", secrets.github);
+///     Ok(())
+/// }
+/// ```
+pub fn decrypt_file<V, P>(etoml: P) -> Result<V, EtomlError>
+where
+    V: Serialize + for<'a> Deserialize<'a> + serde::de::DeserializeOwned,
+    P: AsRef<Path>
+{
+    let toml_str = fs::read_to_string(etoml).map_err(|_| EtomlError::ETomlNotFound)?;
 
     let mut parsed_toml: Value =
         toml::from_str(&toml_str).map_err(|e| EtomlError::MalformattedToml(e.to_string()))?;

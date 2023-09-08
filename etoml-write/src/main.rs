@@ -84,7 +84,7 @@ impl fmt::Display for CmdError {
             CmdError::CantReadEtomlFile => write!(f, "can't read secrets.etoml"),
             CmdError::CantReadPrivateKey => write!(f, "can't read private key file"),
             CmdError::CantDecrypt => write!(f, "Failed to decrypt content of secrets.etoml"),
-            CmdError::FailedToEncrypt(_) => write!(f, "Failed to encrypt"),
+            CmdError::FailedToEncrypt(e) => write!(f, "Failed to encrypt: {}", e),
         }
     }
 }
@@ -99,7 +99,7 @@ enum CmdError {
     CantReadEtomlFile,
     CantReadPrivateKey,
     CantDecrypt,
-    FailedToEncrypt(etoml::MalformattedError),
+    FailedToEncrypt(etoml::EtomlError),
 }
 
 fn init(write: bool) -> Result<(), CmdError> {

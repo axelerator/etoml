@@ -5,13 +5,35 @@ use rsa::pkcs8::EncodePrivateKey;
 use rsa::traits::PublicKeyParts;
 use rsa::{BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::str::FromStr;
 use toml::{Table, Value};
 
 #[derive(Debug, Clone)]
 pub enum EtomlError {
-    IsAlreadyEncrypted,
-    Malformatted,
+    MalformattedToml(String),
+    MalformattedPrivateKey,
+    MalformattedValue,
+    MalformattedEtoml(MalformattedError),
+    InvalidCustomValue(String),
+}
+
+impl fmt::Display for EtomlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EtomlError::MalformattedToml(e) => {
+                write!(f, "The given file is not in valid toml format: {}", e)
+            }
+            EtomlError::MalformattedPrivateKey => {
+                write!(f, "The private key is not in a vaild PEM format")
+            }
+            EtomlError::MalformattedValue => write!(f, "A value is not in valid base64"),
+            EtomlError::MalformattedEtoml(e) => write!(f, "Not a valid Etoml file: {}", e),
+            EtomlError::InvalidCustomValue(s) => {
+                write!(f, "Can't parse into the given type: {}", s)
+            }
+        }
+    }
 }
 
 pub struct WithPrivateKeyString<V>
@@ -44,20 +66,20 @@ where
     let priv_key = RsaPrivateKey::new(&mut rng, bits).expect("failed to generate a key");
     let pub_key = RsaPublicKey::from(&priv_key);
 
-    let enc = |s: &str| -> String {
+    let enc = |s: &str| -> Result<String, EtomlError> {
         if s.starts_with("ET:") {
-            s.to_string()
+            Ok(s.to_string())
         } else {
             let mut rng_ = rand::thread_rng();
             let enc_data = pub_key
                 .encrypt(&mut rng_, Pkcs1v15Encrypt, s.as_bytes())
                 .expect("failed to encrypt");
             let b64 = general_purpose::STANDARD.encode(enc_data);
-            format!("ET:{b64}")
+            Ok(format!("ET:{b64}"))
         }
     };
 
-    let encrypted_toml_str = transform_toml(&mut parsed_toml, enc);
+    let encrypted_toml_str = transform_toml(&mut parsed_toml, enc)?;
     let encrypted_value: V =
         toml::from_str(&encrypted_toml_str).expect("failed to deserialize encrypted toml");
     let private_key_pem = priv_key
@@ -84,6 +106,19 @@ pub enum MalformattedError {
     InvalidPublicKey,
 }
 
+impl fmt::Display for MalformattedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MalformattedError::InvalidToml => write!(f, "Not a valid toml file"),
+            MalformattedError::MissingPublicKey => {
+                write!(f, "Etoml file is missing the public_key field")
+            }
+            MalformattedError::InvalidPublicKey => {
+                write!(f, "The value in the public_key field is invalid")
+            }
+        }
+    }
+}
 pub fn is_etoml(toml_str: &str) -> Result<(), MalformattedError> {
     let parsed_toml: Value =
         toml::from_str(toml_str).map_err(|_| MalformattedError::InvalidToml)?;
@@ -102,19 +137,19 @@ pub fn decrypt_to_string(
     priv_key_str: &str,
 ) -> Result<String, EtomlError> {
     let priv_key = RsaPrivateKey::from_pkcs8_pem(priv_key_str).unwrap();
-    let dec = |s: &str| -> String {
+    let dec = |s: &str| -> Result<String, EtomlError> {
         if let Some(encoded) = s.strip_prefix("ET:") {
             let from_b64 = general_purpose::STANDARD.decode(encoded).unwrap();
 
             let dec_data = priv_key
                 .decrypt(Pkcs1v15Encrypt, from_b64.as_slice())
                 .expect("failed to decrypt");
-            String::from_utf8_lossy(&dec_data).to_string()
+            Ok(String::from_utf8_lossy(&dec_data).to_string())
         } else {
-            s.to_string()
+            Ok(s.to_string())
         }
     };
-    let decrypted_toml_str = transform_toml(parsed_toml, dec);
+    let decrypted_toml_str = transform_toml(parsed_toml, dec)?;
     Ok(decrypted_toml_str)
 }
 
@@ -122,27 +157,32 @@ pub fn decrypt<V>(toml_str: &str, private_pem: &str) -> Result<V, EtomlError>
 where
     V: Serialize + for<'a> Deserialize<'a> + serde::de::DeserializeOwned,
 {
-    let priv_key = RsaPrivateKey::from_pkcs8_pem(private_pem).unwrap();
+    let priv_key = RsaPrivateKey::from_pkcs8_pem(private_pem)
+        .map_err(|_| EtomlError::MalformattedPrivateKey)?;
 
-    let mut parsed_toml: Value = toml::from_str(toml_str).unwrap();
+    let mut parsed_toml: Value =
+        toml::from_str(toml_str).map_err(|e| EtomlError::MalformattedToml(e.to_string()))?;
 
-    let dec = |s: &str| -> String {
+    let dec = |s: &str| -> Result<String, EtomlError> {
         if let Some(encoded) = s.strip_prefix("ET:") {
-            let from_b64 = general_purpose::STANDARD.decode(encoded).unwrap();
+            let from_b64 = general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| EtomlError::MalformattedValue)?;
 
             let dec_data = priv_key
                 .decrypt(Pkcs1v15Encrypt, from_b64.as_slice())
                 .expect("failed to decrypt");
-            String::from_utf8_lossy(&dec_data).to_string()
+            Ok(String::from_utf8_lossy(&dec_data).to_string())
         } else {
-            s.to_string()
+            Ok(s.to_string())
         }
     };
-    let decrypted_toml_str = transform_toml(&mut parsed_toml, dec);
-    let decrypted_table: Table = toml::from_str(&decrypted_toml_str).unwrap();
+    let decrypted_toml_str = transform_toml(&mut parsed_toml, dec)?;
+    let decrypted_table: Table =
+        toml::from_str(&decrypted_toml_str).expect("Failed to parse internal toml");
     let x = &decrypted_table["values"];
     let x_ = toml::to_string(&x).unwrap();
-    let v: V = toml::from_str(&x_).unwrap();
+    let v: V = toml::from_str(&x_).map_err(|e| EtomlError::InvalidCustomValue(e.to_string()))?;
     Ok(v)
 }
 
@@ -158,53 +198,54 @@ pub fn read_public_key(toml: &Value) -> Result<(RsaPublicKey, String), Malformat
     }
 }
 
-pub fn encrypt_existing(toml_str: &str) -> Result<String, MalformattedError> {
+pub fn encrypt_existing(toml_str: &str) -> Result<String, EtomlError> {
     let mut parsed_toml: Value = toml::from_str(toml_str).unwrap();
-    let (pub_key, _) = read_public_key(&parsed_toml)?;
+    let (pub_key, _) = read_public_key(&parsed_toml).map_err(EtomlError::MalformattedEtoml)?;
 
-    let enc = |s: &str| -> String {
+    let enc = |s: &str| -> Result<String, EtomlError> {
         if s.starts_with("ET:") {
-            s.to_string()
+            Ok(s.to_string())
         } else {
             let mut rng_ = rand::thread_rng();
             let enc_data = pub_key
                 .encrypt(&mut rng_, Pkcs1v15Encrypt, s.as_bytes())
                 .expect("failed to encrypt");
             let b64 = general_purpose::STANDARD.encode(enc_data);
-            format!("ET:{b64}")
+            Ok(format!("ET:{b64}"))
         }
     };
 
-    Ok(transform_toml(&mut parsed_toml, enc))
+    transform_toml(&mut parsed_toml, enc)
 }
 
-fn transform_toml<F>(parsed_toml: &mut Value, transform_fn: F) -> String
+fn transform_toml<F>(parsed_toml: &mut Value, transform_fn: F) -> Result<String, EtomlError>
 where
-    F: Fn(&str) -> String,
+    F: Fn(&str) -> Result<String, EtomlError>,
 {
-    transform_values(parsed_toml, &transform_fn);
+    transform_values(parsed_toml, &transform_fn)?;
 
-    toml::to_string(&parsed_toml).unwrap()
+    Ok(toml::to_string(&parsed_toml).unwrap())
 }
 
-fn transform_values<F>(value: &mut Value, transform_fn: &F)
+fn transform_values<F>(value: &mut Value, transform_fn: &F) -> Result<(), EtomlError>
 where
-    F: Fn(&str) -> String,
+    F: Fn(&str) -> Result<String, EtomlError>,
 {
     match value {
         Value::Table(table) => {
             for (key, sub_value) in table.iter_mut() {
                 if key != "public_key" {
-                    transform_values(sub_value, transform_fn);
+                    transform_values(sub_value, transform_fn)?;
                 }
             }
         }
         Value::String(s) => {
-            let transformed = transform_fn(s);
+            let transformed = transform_fn(s)?;
             *s = transformed;
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn serialize_pubkey(pub_key: &RsaPublicKey) -> String {

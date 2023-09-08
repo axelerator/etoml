@@ -1,6 +1,17 @@
-[workspace]
+[package]
+name = "etoml"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
 
-members = [
-    "etoml",
-    "etoml-write"
-]
+[[bin]]
+name = "etoml"
+
+[dependencies]
+base64 = "0.21.3"
+rand = "0.8.5"
+rsa = { version = "0.9.2", features = ["pem"] }
+serde = { version = "1.0.188", features = ["derive"] }
+toml = "0.7.6"
+clap = { version = "4.4.2", features = ["derive"] }
+

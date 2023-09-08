@@ -1,3 +1,5 @@
+#![doc = include_str!("README.md")]
+
 use base64::{engine::general_purpose, Engine as _};
 
 use rsa::pkcs8::DecodePrivateKey;

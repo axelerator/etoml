@@ -1,16 +1,14 @@
 #![doc = include_str!("README.md")]
 
 use base64::{engine::general_purpose, Engine as _};
-
-use rsa::pkcs8::DecodePrivateKey;
-use rsa::pkcs8::EncodePrivateKey;
-use rsa::traits::PublicKeyParts;
-use rsa::{BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use crypto_box::{
+    aead::{Aead, AeadCore, OsRng},
+    ChaChaBox, Nonce, PublicKey, SecretKey,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs;
 use std::path::Path;
-use std::str::FromStr;
 use toml::{Table, Value};
 
 #[derive(Debug, Clone)]
@@ -46,12 +44,12 @@ impl fmt::Display for EtomlError {
     }
 }
 
-pub struct WithPrivateKeyString<V>
+pub struct InitializationResult<V>
 where
     V: Serialize + for<'a> Deserialize<'a>,
 {
     pub encrypted: Encrypted<V>,
-    pub private_key: String,
+    pub private_key: PrivateKeyFile,
 }
 
 #[derive(Serialize)]
@@ -59,53 +57,141 @@ pub struct Encrypted<V>
 where
     V: Serialize + for<'a> Deserialize<'a>,
 {
-    pub public_key: String,
+    #[serde(with = "public_key_b64")]
+    pub public_key: PublicKey,
     pub values: V,
 }
 
-pub fn encrypt_new<V>(value: V, bits: usize) -> Result<WithPrivateKeyString<V>, EtomlError>
+pub fn public_key_as_str<V>(encrypted: &Encrypted<V>) -> String
 where
     V: Serialize + for<'a> Deserialize<'a>,
 {
+    let toml = toml::to_string(&encrypted).unwrap();
+    let table = toml.parse::<Table>().unwrap();
+    table["public_key"].as_str().unwrap().to_string()
+}
+
+mod public_key_b64 {
+    use base64::{engine::general_purpose, Engine as _};
+    use crypto_box::PublicKey;
+    use serde::{Serializer, Serialize};
+
+    pub fn serialize<S: Serializer>(key: &PublicKey, s: S) -> Result<S::Ok, S::Error> {
+        let base64 = general_purpose::URL_SAFE.encode(key.to_bytes());
+        String::serialize(&base64, s)
+    }
+}
+
+mod secret_key_b64 {
+    use base64::{engine::general_purpose, Engine as _};
+    use crypto_box::SecretKey;
+    use serde::{Deserialize, Serialize};
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &SecretKey, s: S) -> Result<S::Ok, S::Error> {
+        let base64 = general_purpose::URL_SAFE.encode(&v.to_bytes());
+        String::serialize(&base64, s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<SecretKey, D::Error> {
+        let base64 = String::deserialize(d)?;
+        let bytes = general_purpose::URL_SAFE
+            .decode(base64)
+            .map_err(|e| serde::de::Error::custom(e))?;
+        Ok(SecretKey::from_bytes(
+            bytes.as_slice()[0..32].try_into().unwrap(),
+        ))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PrivateKeyFile {
+    #[serde(with = "secret_key_b64")]
+    private_key: SecretKey,
+    etoml_version: String,
+}
+
+impl fmt::Display for PrivateKeyFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", toml::to_string(self).unwrap())
+    }
+}
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const SIGNING_KEY: [u8; 32] = [
+    0xe8, 0x98, 0xc, 0x86, 0xe0, 0x32, 0xf1, 0xeb, 0x29, 0x75, 0x5, 0x2e, 0x8d, 0x65, 0xbd, 0xdd,
+    0x15, 0xc3, 0xb5, 0x96, 0x41, 0x17, 0x4e, 0xc9, 0x67, 0x8a, 0x53, 0x78, 0x9d, 0x92, 0xc7, 0x54,
+];
+
+const SIGNING_PRIVATE_KEY: [u8; 32] = [
+    0xb5, 0x81, 0xfb, 0x5a, 0xe1, 0x82, 0xa1, 0x6f, 0x60, 0x3f, 0x39, 0x27, 0xd, 0x4e, 0x3b, 0x95,
+    0xbc, 0x0, 0x83, 0x10, 0xb7, 0x27, 0xa1, 0x1d, 0xd4, 0xe7, 0x84, 0xa0, 0x4, 0x4d, 0x46, 0x1b,
+];
+
+pub fn encrypt_existing(toml_str: &str) -> Result<String, EtomlError> {
+    let mut parsed_toml: Value = toml::from_str(toml_str).unwrap();
+    let (alice_pub_key, _) =
+        read_public_key(&parsed_toml).map_err(EtomlError::MalformattedEtoml)?;
+    let bob_secret_key = SecretKey::from(SIGNING_PRIVATE_KEY);
+    let bob_box = ChaChaBox::new(&alice_pub_key, &bob_secret_key);
+    let nonce = ChaChaBox::generate_nonce(&mut OsRng);
+
+    encrypt_tom(&mut parsed_toml, &bob_box, &nonce)
+}
+
+pub fn encrypt_new<V>(value: V) -> Result<InitializationResult<V>, EtomlError>
+where
+    V: Serialize + for<'a> Deserialize<'a>,
+{
+    let alice_secret_key = SecretKey::generate(&mut OsRng);
+    let pub_key = alice_secret_key.public_key();
+    let bob_public_key = PublicKey::from(SIGNING_KEY);
+
+    let alice_box = ChaChaBox::new(&bob_public_key, &alice_secret_key);
+    let nonce = ChaChaBox::generate_nonce(&mut OsRng);
+
     let toml_str = toml::to_string(&value).expect("Failed to serialize given value to toml");
     let mut parsed_toml: Value =
         toml::from_str(&toml_str).expect("Failed to serialize given value to toml");
-    let line_ending = rsa::pkcs1::LineEnding::LF;
-    let mut rng = rand::thread_rng();
-    let priv_key = RsaPrivateKey::new(&mut rng, bits).expect("failed to generate a key");
-    let pub_key = RsaPublicKey::from(&priv_key);
+    let encrypted_toml_str = encrypt_tom(&mut parsed_toml, &alice_box, &nonce)?;
+    let encrypted_value: V =
+        toml::from_str(&encrypted_toml_str).expect("failed to deserialize encrypted toml");
 
+    let encrypted = Encrypted {
+        public_key: pub_key,
+        values: encrypted_value,
+    };
+
+    let priv_key_file = PrivateKeyFile {
+        private_key: alice_secret_key,
+        etoml_version: VERSION.to_string(),
+    };
+
+    Ok(InitializationResult {
+        encrypted,
+        private_key: priv_key_file,
+    })
+}
+
+fn encrypt_tom(
+    parsed_toml: &mut Value,
+    cypher_box: &ChaChaBox,
+    nonce: &Nonce,
+) -> Result<String, EtomlError> {
     let enc = |s: &str| -> Result<String, EtomlError> {
         if s.starts_with("ET:") {
             Ok(s.to_string())
         } else {
-            let mut rng_ = rand::thread_rng();
-            let enc_data = pub_key
-                .encrypt(&mut rng_, Pkcs1v15Encrypt, s.as_bytes())
-                .expect("failed to encrypt");
-            let b64 = general_purpose::STANDARD.encode(enc_data);
-            Ok(format!("ET:{b64}"))
+            let nonce_b64 = general_purpose::URL_SAFE.encode(&nonce);
+
+            let ciphertext = cypher_box.encrypt(&nonce, s.as_bytes()).unwrap();
+            let b64 = general_purpose::URL_SAFE.encode(ciphertext);
+            Ok(format!("ET:{nonce_b64}:{b64}"))
         }
     };
 
-    let encrypted_toml_str = transform_toml(&mut parsed_toml, enc)?;
-    let encrypted_value: V =
-        toml::from_str(&encrypted_toml_str).expect("failed to deserialize encrypted toml");
-    let private_key_pem = priv_key
-        .to_pkcs8_pem(line_ending)
-        .expect("failed to write private key")
-        .to_string();
-
-    let public_key_str = serialize_pubkey(&pub_key);
-    let encrypted = Encrypted {
-        public_key: public_key_str,
-        values: encrypted_value,
-    };
-
-    Ok(WithPrivateKeyString {
-        encrypted,
-        private_key: private_key_pem,
-    })
+    transform_toml(parsed_toml, enc)
 }
 
 #[derive(Debug, Clone)]
@@ -135,31 +221,20 @@ pub fn is_etoml(toml_str: &str) -> Result<(), MalformattedError> {
         let key_str = table["public_key"]
             .as_str()
             .ok_or(MalformattedError::InvalidPublicKey)?;
-        let _pub_key = deserialize_pubkey(key_str);
+        let _pub_key = deserialize_pubkey(key_str)?;
     } else {
         return Err(MalformattedError::InvalidToml);
     };
     Ok(())
 }
-pub fn decrypt_to_string(
-    parsed_toml: &mut Value,
-    priv_key_str: &str,
-) -> Result<String, EtomlError> {
-    let priv_key = RsaPrivateKey::from_pkcs8_pem(priv_key_str).unwrap();
-    let dec = |s: &str| -> Result<String, EtomlError> {
-        if let Some(encoded) = s.strip_prefix("ET:") {
-            let from_b64 = general_purpose::STANDARD.decode(encoded).unwrap();
 
-            let dec_data = priv_key
-                .decrypt(Pkcs1v15Encrypt, from_b64.as_slice())
-                .expect("failed to decrypt");
-            Ok(String::from_utf8_lossy(&dec_data).to_string())
-        } else {
-            Ok(s.to_string())
-        }
-    };
-    let decrypted_toml_str = transform_toml(parsed_toml, dec)?;
-    Ok(decrypted_toml_str)
+fn deserialize_pubkey(input: &str) -> Result<PublicKey, MalformattedError> {
+    let bytes = general_purpose::URL_SAFE
+        .decode(input)
+        .map_err(|_| MalformattedError::InvalidPublicKey)?;
+    Ok(PublicKey::from_bytes(
+        bytes.as_slice()[0..32].try_into().unwrap(),
+    ))
 }
 
 /// Returns the decrypted secrets deserialized into the given type.
@@ -233,28 +308,51 @@ where
     let default_priv_key_dir = Path::new("/opt/etoml/keys");
     let priv_key_file = default_priv_key_dir.join(pub_key_serialized);
 
-    let private_key_pem =
+    let private_key_content =
         fs::read_to_string(priv_key_file).map_err(|_| EtomlError::PrivateKeyNotFound)?;
-    decrypt::<_>(&mut parsed_toml, &private_key_pem)
+
+    let private_key_file: PrivateKeyFile =
+        toml::from_str(&private_key_content).map_err(|_| EtomlError::MalformattedPrivateKey)?;
+
+    decrypt::<_>(&mut parsed_toml, &private_key_file)
 }
 
-pub fn decrypt<V>(parsed_toml: &mut Value, private_pem: &str) -> Result<V, EtomlError>
+pub fn decrypt<V>(
+    parsed_toml: &mut Value,
+    private_key_file: &PrivateKeyFile,
+) -> Result<V, EtomlError>
 where
     V: Serialize + for<'a> Deserialize<'a> + serde::de::DeserializeOwned,
 {
-    let priv_key = RsaPrivateKey::from_pkcs8_pem(private_pem)
-        .map_err(|_| EtomlError::MalformattedPrivateKey)?;
+    let alice_public_key = PublicKey::from(&private_key_file.private_key);
+    let bob_secret_key = SecretKey::from(SIGNING_PRIVATE_KEY);
+    let bob_box = ChaChaBox::new(&alice_public_key, &bob_secret_key);
 
     let dec = |s: &str| -> Result<String, EtomlError> {
-        if let Some(encoded) = s.strip_prefix("ET:") {
-            let from_b64 = general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|_| EtomlError::MalformattedValue)?;
+        if let Some(nonce_and_value_b64) = s.strip_prefix("ET:") {
+            let parts: Vec<&str> = nonce_and_value_b64.split(':').collect();
+            if parts.len() == 2 {
+                let (nonce_b64, encoded_b64) = (parts[0], parts[1]);
+                let nonce_bytes = general_purpose::URL_SAFE
+                    .decode(nonce_b64)
+                    .map_err(|_| EtomlError::MalformattedValue)?;
+                let nonce = Nonce::from_slice(&nonce_bytes);
 
-            let dec_data = priv_key
-                .decrypt(Pkcs1v15Encrypt, from_b64.as_slice())
-                .expect("failed to decrypt");
-            Ok(String::from_utf8_lossy(&dec_data).to_string())
+                let from_b64 = general_purpose::URL_SAFE
+                    .decode(encoded_b64)
+                    .map_err(|_| EtomlError::MalformattedValue)?;
+
+                let err = bob_box.decrypt(nonce, from_b64.as_slice());
+                if let Err(e) = err {
+                    println!("{:?}, {:?}", from_b64, e);
+                }
+
+                let decrypted_plaintext = bob_box.decrypt(nonce, from_b64.as_slice()).unwrap();
+
+                Ok(String::from_utf8_lossy(&decrypted_plaintext).to_string())
+            } else {
+                Err(EtomlError::MalformattedValue)
+            }
         } else {
             Ok(s.to_string())
         }
@@ -268,7 +366,7 @@ where
     Ok(v)
 }
 
-pub fn read_public_key(toml: &Value) -> Result<(RsaPublicKey, String), MalformattedError> {
+pub fn read_public_key(toml: &Value) -> Result<(PublicKey, String), MalformattedError> {
     if let Value::Table(ref table) = toml {
         let key_str = table["public_key"]
             .as_str()
@@ -278,26 +376,6 @@ pub fn read_public_key(toml: &Value) -> Result<(RsaPublicKey, String), Malformat
     } else {
         Err(MalformattedError::InvalidToml)
     }
-}
-
-pub fn encrypt_existing(toml_str: &str) -> Result<String, EtomlError> {
-    let mut parsed_toml: Value = toml::from_str(toml_str).unwrap();
-    let (pub_key, _) = read_public_key(&parsed_toml).map_err(EtomlError::MalformattedEtoml)?;
-
-    let enc = |s: &str| -> Result<String, EtomlError> {
-        if s.starts_with("ET:") {
-            Ok(s.to_string())
-        } else {
-            let mut rng_ = rand::thread_rng();
-            let enc_data = pub_key
-                .encrypt(&mut rng_, Pkcs1v15Encrypt, s.as_bytes())
-                .expect("failed to encrypt");
-            let b64 = general_purpose::STANDARD.encode(enc_data);
-            Ok(format!("ET:{b64}"))
-        }
-    };
-
-    transform_toml(&mut parsed_toml, enc)
 }
 
 fn transform_toml<F>(parsed_toml: &mut Value, transform_fn: F) -> Result<String, EtomlError>
@@ -330,6 +408,7 @@ where
     Ok(())
 }
 
+/*
 fn serialize_pubkey(pub_key: &RsaPublicKey) -> String {
     format!("{}_{}", pub_key.n(), pub_key.e())
 }
@@ -345,10 +424,7 @@ fn parse_bigint_pair(s: &str) -> Option<(BigUint, BigUint)> {
 
     None
 }
-fn deserialize_pubkey(input: &str) -> Result<RsaPublicKey, MalformattedError> {
-    let (n, e) = parse_bigint_pair(input).ok_or(MalformattedError::InvalidPublicKey)?;
-    RsaPublicKey::new(n, e).map_err(|_| MalformattedError::InvalidPublicKey)
-}
+*/
 
 #[cfg(test)]
 mod tests {
@@ -418,7 +494,7 @@ Xg5m5+uzGyo4
         let unencrypted_value = MyKeys {
             openai: "Secret".to_string(),
         };
-        let WithPrivateKeyString {
+        let InitializationResult {
             encrypted,
             private_key,
         } = encrypt_new(unencrypted_value, 512).unwrap();

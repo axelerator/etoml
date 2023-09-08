@@ -38,13 +38,13 @@ fn cli() -> Command {
         )
         .subcommand(
             Command::new("encrypt")
-                .about("(Re-)encrypt unencrypted values in an existinf etoml file")
+                .about("(Re-)encrypt unencrypted values in an existing etoml file")
                 .arg(arg!([PATH] "The etoml file to encrypt").value_parser(clap::value_parser!(PathBuf)))
                 .arg_required_else_help(false),
         )
         .subcommand(
             Command::new("decrypt")
-                .about("decrypt unencrypted values in an existinf etoml file")
+                .about("decrypt unencrypted values in an existing etoml file")
                 .arg(arg!([PATH] "The etoml file to decrypt").value_parser(clap::value_parser!(PathBuf)))
                 .arg_required_else_help(false),
         )
@@ -80,10 +80,8 @@ impl fmt::Display for CmdError {
             CmdError::CantWriteEtoml => write!(f, "can't write secrets.etoml"),
             CmdError::EtomlAlreadyExists => write!(f, "A secrets.etml already exists"),
             CmdError::NoEtomlFile => write!(f, "Can't find secrets.etoml"),
-            CmdError::InValidEtomlFile => write!(f, "secrets.etoml has an invalid format"),
+            CmdError::InValidEtomlFile(e) => write!(f, "secrets.etoml has an invalid format: {e}"),
             CmdError::CantReadEtomlFile => write!(f, "can't read secrets.etoml"),
-            CmdError::CantReadPrivateKey => write!(f, "can't read private key file"),
-            CmdError::CantDecrypt => write!(f, "Failed to decrypt content of secrets.etoml"),
             CmdError::FailedToEncrypt(e) => write!(f, "Failed to encrypt: {}", e),
         }
     }
@@ -95,10 +93,8 @@ enum CmdError {
     CantWriteEtoml,
     EtomlAlreadyExists,
     NoEtomlFile,
-    InValidEtomlFile,
+    InValidEtomlFile(etoml::EtomlError),
     CantReadEtomlFile,
-    CantReadPrivateKey,
-    CantDecrypt,
     FailedToEncrypt(etoml::EtomlError),
 }
 
@@ -106,7 +102,7 @@ fn init(write: bool) -> Result<(), CmdError> {
     let template = Template {
         my_first_key: "my first secret".to_string(),
     };
-    let encrypt_result = etoml::encrypt_new(template, 2048).expect("Failed to encrypt template");
+    let encrypt_result = etoml::encrypt_new(template).expect("Failed to encrypt template");
     let output_toml = toml::to_string(&encrypt_result.encrypted).unwrap();
 
     if write {
@@ -121,8 +117,10 @@ fn init(write: bool) -> Result<(), CmdError> {
             return Err(CmdError::EtomlAlreadyExists);
         }
 
-        let key_file = default_priv_key_dir.join(encrypt_result.encrypted.public_key);
-        fs::write(key_file, encrypt_result.private_key)
+        let key_filename = etoml::public_key_as_str(&encrypt_result.encrypted);
+        let key_file = default_priv_key_dir.join(key_filename);
+
+        fs::write(key_file, encrypt_result.private_key.to_string())
             .map_err(|_| CmdError::CantWriteToDefaultDir)?;
 
         fs::write(etoml_file, output_toml).map_err(|_| CmdError::CantWriteEtoml)?
@@ -146,24 +144,8 @@ fn encrypt() -> Result<(), CmdError> {
 
 fn decrypt() -> Result<(), CmdError> {
     let etoml_file = Path::new("secrets.etoml");
-    if !etoml_file.exists() {
-        return Err(CmdError::NoEtomlFile);
-    }
+    let value: Value = etoml::decrypt_file(etoml_file).map_err(CmdError::InValidEtomlFile)?;
 
-    let toml_str = fs::read_to_string(etoml_file).map_err(|_| CmdError::CantReadEtomlFile)?;
-    let mut parsed_toml: Value =
-        toml::from_str(&toml_str).map_err(|_| CmdError::InValidEtomlFile)?;
-    let (_, pub_key_serialized) =
-        etoml::read_public_key(&parsed_toml).map_err(|_| CmdError::InValidEtomlFile)?;
-
-    let default_priv_key_dir = Path::new("/opt/etoml/keys");
-    let priv_key_file = default_priv_key_dir.join(pub_key_serialized);
-
-    let private_key_pem =
-        fs::read_to_string(priv_key_file).map_err(|_| CmdError::CantReadPrivateKey)?;
-
-    let decrypted = etoml::decrypt_to_string(&mut parsed_toml, &private_key_pem)
-        .map_err(|_| CmdError::CantDecrypt)?;
-    println!("{decrypted}");
+    println!("{}", toml::to_string(&value).unwrap());
     Ok(())
 }

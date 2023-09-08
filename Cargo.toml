@@ -1,8 +1,17 @@
 [package]
 name = "etoml"
+description = "A command line utility for managing secrets in encrypted TOML files"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+categories = ["command-line-utilities", "secrets"]
+repository = "https://github.com/axelerator/etoml"
+authors = ["Axel Tetzlaff <axel.tetzlaff@gmx.de>"]
+keywords = [
+    "cryptography",
+    "secrets",
+    "encryption"
+]
 
 [[bin]]
 name = "etoml"

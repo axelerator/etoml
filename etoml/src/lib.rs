@@ -6,6 +6,8 @@ use rsa::traits::PublicKeyParts;
 use rsa::{BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::fs;
+use std::path::Path;
 use std::str::FromStr;
 use toml::{Table, Value};
 
@@ -16,6 +18,8 @@ pub enum EtomlError {
     MalformattedValue,
     MalformattedEtoml(MalformattedError),
     InvalidCustomValue(String),
+    ETomlNotFound,
+    PrivateKeyNotFound,
 }
 
 impl fmt::Display for EtomlError {
@@ -31,6 +35,10 @@ impl fmt::Display for EtomlError {
             EtomlError::MalformattedEtoml(e) => write!(f, "Not a valid Etoml file: {}", e),
             EtomlError::InvalidCustomValue(s) => {
                 write!(f, "Can't parse into the given type: {}", s)
+            }
+            EtomlError::ETomlNotFound => write!(f, "Unable to locate the secrets.etoml"),
+            EtomlError::PrivateKeyNotFound => {
+                write!(f, "Unable to locate the private key in /opt/etoml/keys")
             }
         }
     }
@@ -153,15 +161,52 @@ pub fn decrypt_to_string(
     Ok(decrypted_toml_str)
 }
 
-pub fn decrypt<V>(toml_str: &str, private_pem: &str) -> Result<V, EtomlError>
+/// Returns the decrypted secrets deserialized into the given type.
+///
+/// It expects to find the "secrets.etoml" in the same directory as
+/// from where the process is running.
+/// And it looks for the private key in the default location
+/// /opt/etoml/keys
+///
+/// # Example
+///
+/// ```
+/// #[derive(Serialize, Deserialize)]
+/// struct AppSecrets {
+///     github: String
+/// }
+///
+/// fn main() {
+///     let secrets : AppSecrets = etoml::decrypt_default().unwrap();
+///     println!("Github key: {}", secrets.github);
+/// }
+/// ```
+pub fn decrypt_default<V>() -> Result<V, EtomlError>
+where
+    V: Serialize + for<'a> Deserialize<'a> + serde::de::DeserializeOwned,
+{
+    let toml_str = fs::read_to_string("secrets.etoml").map_err(|_| EtomlError::ETomlNotFound)?;
+
+    let mut parsed_toml: Value =
+        toml::from_str(&toml_str).map_err(|e| EtomlError::MalformattedToml(e.to_string()))?;
+
+    let (_, pub_key_serialized) =
+        read_public_key(&parsed_toml).map_err(|e| EtomlError::MalformattedEtoml(e))?;
+
+    let default_priv_key_dir = Path::new("/opt/etoml/keys");
+    let priv_key_file = default_priv_key_dir.join(pub_key_serialized);
+
+    let private_key_pem =
+        fs::read_to_string(priv_key_file).map_err(|_| EtomlError::PrivateKeyNotFound)?;
+    decrypt::<_>(&mut parsed_toml, &private_key_pem)
+}
+
+pub fn decrypt<V>(parsed_toml: &mut Value, private_pem: &str) -> Result<V, EtomlError>
 where
     V: Serialize + for<'a> Deserialize<'a> + serde::de::DeserializeOwned,
 {
     let priv_key = RsaPrivateKey::from_pkcs8_pem(private_pem)
         .map_err(|_| EtomlError::MalformattedPrivateKey)?;
-
-    let mut parsed_toml: Value =
-        toml::from_str(toml_str).map_err(|e| EtomlError::MalformattedToml(e.to_string()))?;
 
     let dec = |s: &str| -> Result<String, EtomlError> {
         if let Some(encoded) = s.strip_prefix("ET:") {
@@ -177,7 +222,7 @@ where
             Ok(s.to_string())
         }
     };
-    let decrypted_toml_str = transform_toml(&mut parsed_toml, dec)?;
+    let decrypted_toml_str = transform_toml(parsed_toml, dec)?;
     let decrypted_table: Table =
         toml::from_str(&decrypted_toml_str).expect("Failed to parse internal toml");
     let x = &decrypted_table["values"];

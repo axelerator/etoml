@@ -33,7 +33,7 @@ fn cli() -> Command {
         .subcommand(
             Command::new("init")
                 .about("Create a new encrypted TOML file")
-                .arg(arg!(-w --write "Write the private key to the default directory (/opt/etoml/keys)"))
+                .arg(arg!(-w --write "Write the private key to the default directory (/opt/etoml/keys) and a secrets.etoml template"))
                 .arg_required_else_help(false),
         )
         .subcommand(

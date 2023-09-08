@@ -74,7 +74,7 @@ where
 mod public_key_b64 {
     use base64::{engine::general_purpose, Engine as _};
     use crypto_box::PublicKey;
-    use serde::{Serializer, Serialize};
+    use serde::{Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(key: &PublicKey, s: S) -> Result<S::Ok, S::Error> {
         let base64 = general_purpose::URL_SAFE.encode(key.to_bytes());
@@ -89,7 +89,7 @@ mod secret_key_b64 {
     use serde::{Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(v: &SecretKey, s: S) -> Result<S::Ok, S::Error> {
-        let base64 = general_purpose::URL_SAFE.encode(&v.to_bytes());
+        let base64 = general_purpose::URL_SAFE.encode(v.to_bytes());
         String::serialize(&base64, s)
     }
 
@@ -97,7 +97,7 @@ mod secret_key_b64 {
         let base64 = String::deserialize(d)?;
         let bytes = general_purpose::URL_SAFE
             .decode(base64)
-            .map_err(|e| serde::de::Error::custom(e))?;
+            .map_err(serde::de::Error::custom)?;
         Ok(SecretKey::from_bytes(
             bytes.as_slice()[0..32].try_into().unwrap(),
         ))
@@ -183,9 +183,9 @@ fn encrypt_tom(
         if s.starts_with("ET:") {
             Ok(s.to_string())
         } else {
-            let nonce_b64 = general_purpose::URL_SAFE.encode(&nonce);
+            let nonce_b64 = general_purpose::URL_SAFE.encode(nonce);
 
-            let ciphertext = cypher_box.encrypt(&nonce, s.as_bytes()).unwrap();
+            let ciphertext = cypher_box.encrypt(nonce, s.as_bytes()).unwrap();
             let b64 = general_purpose::URL_SAFE.encode(ciphertext);
             Ok(format!("ET:{nonce_b64}:{b64}"))
         }
@@ -435,28 +435,23 @@ mod tests {
         openai: String,
     }
 
-    const PRIVATE_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
-MIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA6hhqfgA+g27DgZYs
-NdthykWQ2AyitLXGdEzusgomfDv7apOOmS7vbwoBH0Zuoty+wozRrp/H87AnDCrC
-GkiXfwIDAQABAkB/B47KHwHNOo7WxBHri8eOBp/pzTmBjF5Lf+/LJxzpLm23i/K+
-Rs+Zu/elDjnSgFQnqgO4sX+gkC4zQQuPefTBAiEA8tHTvjP9mBWEs99O5qWkmO1b
-6rnm1R6Jipowbs7GVl8CIQD2zVu3h7LFX+4z4dj5d9g1cGzgkq9B0GTdib7YdpwS
-4QIhAJxV8kFs0eKgQB9bMD6Z+V6ou9xlsrQWhDGj0nkVUmd7AiAlzilJgNDiqSI8
-8lChTjlhXjpfYDjWdQyuXuZMFEcuIQIhAOPQgGl7aBAnv/XbP07cQZaAF/WN2KPo
-Xg5m5+uzGyo4
------END PRIVATE KEY-----"#;
+    const PRIVATE_PEM: &str = r#"private_key = "QUTOE7iTEQpIfbW36Uc5JW-LOebHqjJUP_f6z5OA4hs="
+etoml_version = "0.1.0""#;
 
     #[test]
     fn test_decrypt() {
-        let toml_str = r#" public_key = "12260569626986955858848812559948534323761734740811373688584155384436822647212591191730567240822045931966214046021411287999488214521023340344863858673358719_65537"
+        let toml_str = r#"
+public_key = "H6mRd17HeQXilDxJzK2XG6hCbv2KBsFiAvPiRlRj3lE="
 
-            [values]
-            openai = "ET:yX8FO+3gMWRsfzUNepNv7XYxL5drIiHVOTNeyqrEh9apFCThqkk3RlskaidokB58BCb2Hh6Vi+NaGLI+8PkB/g=="
+[values]
+openai = "ET:7UT068ic9t_cXS1o6X8iHtQM2SPWK5md:oR2hoSZGfFZ2yqQbta1igY71Pfk="
             "#;
+        let private_key_file: PrivateKeyFile = toml::from_str(&PRIVATE_PEM).unwrap();
+
         let mut parsed_toml: Value =
             toml::from_str(&toml_str).expect("Failed to serialize given value to toml");
-        let decrypted = decrypt::<MyKeys>(&mut parsed_toml, PRIVATE_PEM).unwrap();
-        assert_eq!("my first secret", decrypted.openai);
+        let decrypted = decrypt::<MyKeys>(&mut parsed_toml, &private_key_file).unwrap();
+        assert_eq!("what", decrypted.openai);
     }
 
     #[derive(Serialize, Deserialize)]
@@ -467,12 +462,12 @@ Xg5m5+uzGyo4
 
     #[test]
     fn test_reencrypt() {
-        let toml_str = r#" public_key = "12260569626986955858848812559948534323761734740811373688584155384436822647212591191730567240822045931966214046021411287999488214521023340344863858673358719_65537"
+        let toml_str = r#"
+public_key = "H6mRd17HeQXilDxJzK2XG6hCbv2KBsFiAvPiRlRj3lE="
 
-            [values]
-            openai = "ET:yX8FO+3gMWRsfzUNepNv7XYxL5drIiHVOTNeyqrEh9apFCThqkk3RlskaidokB58BCb2Hh6Vi+NaGLI+8PkB/g=="
-
-            github = "AnotherSecret"
+[values]
+openai = "ET:7UT068ic9t_cXS1o6X8iHtQM2SPWK5md:oR2hoSZGfFZ2yqQbta1igY71Pfk="
+github = "AnotherSecret"
             "#;
         let encrypted = encrypt_existing(toml_str).unwrap();
         let encrypted_parsed: Table = toml::from_str(&encrypted).unwrap();
@@ -480,11 +475,13 @@ Xg5m5+uzGyo4
         let github_encrypted = values["github"].as_str().unwrap();
 
         // making sure value has been encrypted
-        assert_eq!(91, github_encrypted.len());
+        assert_eq!(76, github_encrypted.len());
 
         let mut parsed_toml: Value =
             toml::from_str(&encrypted).expect("Failed to serialize given value to toml");
-        let decrypted = decrypt::<MyKeysWithNew>(&mut parsed_toml, PRIVATE_PEM).unwrap();
+        let private_key_file: PrivateKeyFile = toml::from_str(&PRIVATE_PEM).unwrap();
+
+        let decrypted = decrypt::<MyKeysWithNew>(&mut parsed_toml, &private_key_file).unwrap();
 
         assert_eq!("AnotherSecret", decrypted.github);
     }
@@ -497,10 +494,10 @@ Xg5m5+uzGyo4
         let InitializationResult {
             encrypted,
             private_key,
-        } = encrypt_new(unencrypted_value, 512).unwrap();
+        } = encrypt_new(unencrypted_value).unwrap();
 
         // making sure value has been encrypted
-        assert_eq!(91, encrypted.values.openai.len());
+        assert_eq!(68, encrypted.values.openai.len());
 
         let output_toml = toml::to_string(&encrypted).unwrap();
 

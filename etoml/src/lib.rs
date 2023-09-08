@@ -103,8 +103,8 @@ pub fn decrypt_to_string(
 ) -> Result<String, EtomlError> {
     let priv_key = RsaPrivateKey::from_pkcs8_pem(priv_key_str).unwrap();
     let dec = |s: &str| -> String {
-        if s.starts_with("ET:") {
-            let from_b64 = general_purpose::STANDARD.decode(&s[3..]).unwrap();
+        if let Some(encoded) = s.strip_prefix("ET:") {
+            let from_b64 = general_purpose::STANDARD.decode(encoded).unwrap();
 
             let dec_data = priv_key
                 .decrypt(Pkcs1v15Encrypt, from_b64.as_slice())
@@ -127,8 +127,8 @@ where
     let mut parsed_toml: Value = toml::from_str(toml_str).unwrap();
 
     let dec = |s: &str| -> String {
-        if s.starts_with("ET:") {
-            let from_b64 = general_purpose::STANDARD.decode(&s[3..]).unwrap();
+        if let Some(encoded) = s.strip_prefix("ET:") {
+            let from_b64 = general_purpose::STANDARD.decode(encoded).unwrap();
 
             let dec_data = priv_key
                 .decrypt(Pkcs1v15Encrypt, from_b64.as_slice())

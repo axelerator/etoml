@@ -2,7 +2,9 @@
 
 # etoml
 
-A tool to create and manage application secrets securely protected in (RSA 2048bits) encrypted toml files.
+A tool to create and manage application secrets securely protected in encrypted
+(with [ChaCha](https://docs.rs/crypto_box/latest/crypto_box/index.html?search=ChaChaBox#choosing-chachabox-vs-salsabox) 
+toml files.
 
 This is basically a Rust/Toml port of [ejson](https://github.com/Shopify/ejson).
 The main features is it gives you a convenience function to decrypt your secrets directly

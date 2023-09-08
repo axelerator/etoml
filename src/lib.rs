@@ -220,7 +220,7 @@ where
 pub fn decrypt_file<V, P>(etoml: P) -> Result<V, EtomlError>
 where
     V: Serialize + for<'a> Deserialize<'a> + serde::de::DeserializeOwned,
-    P: AsRef<Path>
+    P: AsRef<Path>,
 {
     let toml_str = fs::read_to_string(etoml).map_err(|_| EtomlError::ETomlNotFound)?;
 

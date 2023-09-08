@@ -1,4 +1,4 @@
-[!CI badge](https://github.com/axelerator/etoml/actions/workflows/ci.yml/badge.svg)
+![CI badge](https://github.com/axelerator/etoml/actions/workflows/ci.yml/badge.svg)
 
 # etoml
 

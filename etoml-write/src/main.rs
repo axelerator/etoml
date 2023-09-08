@@ -2,8 +2,8 @@ use clap::{arg, Command, Parser};
 
 use serde::{Deserialize, Serialize};
 
-use std::{fs, fmt, process};
-use std::path::{PathBuf, Path};
+use std::path::{Path, PathBuf};
+use std::{fmt, fs, process};
 use toml::{self, Value};
 
 #[derive(Serialize, Deserialize)]
@@ -52,20 +52,13 @@ fn cli() -> Command {
 
 fn main() {
     let matches = cli().get_matches();
-    let result =
-        match matches.subcommand() {
-            Some(("init", sub_matches)) => {
-                init(*sub_matches.get_one::<bool>("write").unwrap())
-            }
-            Some(("encrypt", _sub_matches)) => {
-                encrypt()
-            }
-            Some(("decrypt", _sub_matches)) => {
-                decrypt()
-            }
-            Some((&_, _)) => unreachable!(),
-            None => unreachable!()
-        };
+    let result = match matches.subcommand() {
+        Some(("init", sub_matches)) => init(*sub_matches.get_one::<bool>("write").unwrap()),
+        Some(("encrypt", _sub_matches)) => encrypt(),
+        Some(("decrypt", _sub_matches)) => decrypt(),
+        Some((&_, _)) => unreachable!(),
+        None => unreachable!(),
+    };
     if let Err(e) = result {
         eprintln!("Failure: {}", e);
         process::exit(1);
@@ -74,13 +67,16 @@ fn main() {
 
 #[derive(Serialize, Deserialize)]
 struct Template {
-    my_first_key: String
+    my_first_key: String,
 }
 
 impl fmt::Display for CmdError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CmdError::CantWriteToDefaultDir => write!(f, "can't write to default dir for private keys: /opt/etoml/keys"),
+            CmdError::CantWriteToDefaultDir => write!(
+                f,
+                "can't write to default dir for private keys: /opt/etoml/keys"
+            ),
             CmdError::CantWriteEtoml => write!(f, "can't write secrets.etoml"),
             CmdError::EtomlAlreadyExists => write!(f, "A secrets.etml already exists"),
             CmdError::NoEtomlFile => write!(f, "Can't find secrets.etoml"),
@@ -106,16 +102,18 @@ enum CmdError {
     FailedToEncrypt(etoml::MalformattedError),
 }
 
-
 fn init(write: bool) -> Result<(), CmdError> {
-    let template = Template { my_first_key: "my first secret".to_string() };
+    let template = Template {
+        my_first_key: "my first secret".to_string(),
+    };
     let encrypt_result = etoml::encrypt_new(template).expect("Failed to encrypt template");
     let output_toml = toml::to_string(&encrypt_result.encrypted).unwrap();
 
     if write {
         let default_priv_key_dir = Path::new("/opt/etoml/keys");
         if !default_priv_key_dir.exists() {
-            fs::create_dir_all(default_priv_key_dir).map_err(|_| CmdError::CantWriteToDefaultDir)?;
+            fs::create_dir_all(default_priv_key_dir)
+                .map_err(|_| CmdError::CantWriteToDefaultDir)?;
         }
 
         let etoml_file = Path::new("secrets.etoml");
@@ -127,9 +125,7 @@ fn init(write: bool) -> Result<(), CmdError> {
         fs::write(key_file, encrypt_result.private_key)
             .map_err(|_| CmdError::CantWriteToDefaultDir)?;
 
-        fs::write(etoml_file, output_toml)
-            .map_err(|_| CmdError::CantWriteEtoml)?
-
+        fs::write(etoml_file, output_toml).map_err(|_| CmdError::CantWriteEtoml)?
     } else {
         println!("Private key:\n{}", encrypt_result.private_key);
         println!("TOML template\n{}", output_toml);
@@ -143,11 +139,9 @@ fn encrypt() -> Result<(), CmdError> {
         return Err(CmdError::NoEtomlFile);
     }
     let toml_str = fs::read_to_string(etoml_file).map_err(|_| CmdError::CantReadEtomlFile)?;
-    let encrypted_toml =
-        etoml::encrypt_existing(&toml_str).map_err(CmdError::FailedToEncrypt)?;
+    let encrypted_toml = etoml::encrypt_existing(&toml_str).map_err(CmdError::FailedToEncrypt)?;
 
-    fs::write(etoml_file, encrypted_toml)
-        .map_err(|_| CmdError::CantWriteEtoml)
+    fs::write(etoml_file, encrypted_toml).map_err(|_| CmdError::CantWriteEtoml)
 }
 
 fn decrypt() -> Result<(), CmdError> {
@@ -157,15 +151,19 @@ fn decrypt() -> Result<(), CmdError> {
     }
 
     let toml_str = fs::read_to_string(etoml_file).map_err(|_| CmdError::CantReadEtomlFile)?;
-    let mut parsed_toml: Value = toml::from_str(&toml_str).map_err(|_| CmdError::InValidEtomlFile)?;
-    let (_, pub_key_serialized) = etoml::read_public_key(&parsed_toml).map_err(|_| CmdError::InValidEtomlFile)?;
+    let mut parsed_toml: Value =
+        toml::from_str(&toml_str).map_err(|_| CmdError::InValidEtomlFile)?;
+    let (_, pub_key_serialized) =
+        etoml::read_public_key(&parsed_toml).map_err(|_| CmdError::InValidEtomlFile)?;
 
     let default_priv_key_dir = Path::new("/opt/etoml/keys");
     let priv_key_file = default_priv_key_dir.join(pub_key_serialized);
 
-    let private_key_pem = fs::read_to_string(priv_key_file).map_err(|_| CmdError::CantReadPrivateKey)?;
+    let private_key_pem =
+        fs::read_to_string(priv_key_file).map_err(|_| CmdError::CantReadPrivateKey)?;
 
-    let decrypted = etoml::decrypt_to_string(&mut parsed_toml, &private_key_pem).map_err(|_| CmdError::CantDecrypt)?;
+    let decrypted = etoml::decrypt_to_string(&mut parsed_toml, &private_key_pem)
+        .map_err(|_| CmdError::CantDecrypt)?;
     println!("{decrypted}");
     Ok(())
 }

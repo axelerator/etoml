@@ -184,7 +184,6 @@ where
 {
     transform_values(parsed_toml, &transform_fn);
 
-    
     toml::to_string(&parsed_toml).unwrap()
 }
 

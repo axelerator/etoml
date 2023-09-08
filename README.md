@@ -10,6 +10,7 @@ This is basically a Rust/Toml port of [ejson](https://github.com/Shopify/ejson).
 The main features is it gives you a convenience function to decrypt your secrets directly
 into a `struct` in your application.
 
+![Demonstration](https://raw.githubusercontent.com/axelerator/etoml/main/etoml.gif)
 ## Install
 
 `cargo install etoml`

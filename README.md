@@ -31,8 +31,8 @@ Usage: etoml-write <COMMAND>
 
 Commands:
   init     Create a new encrypted TOML file
-  encrypt  (Re-)encrypt unencrypted values in an existinf etoml file
-  decrypt  decrypt unencrypted values in an existinf etoml file
+  encrypt  (Re-)encrypt unencrypted values in an existing etoml file
+  decrypt  decrypt unencrypted values in an existing etoml file
   help     Print this message or the help of the given subcommand(s)
 
 Options:
